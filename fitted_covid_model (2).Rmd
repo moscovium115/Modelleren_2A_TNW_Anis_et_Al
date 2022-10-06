@@ -1,0 +1,529 @@
+---
+title: "fitted covid project"
+output: html_document
+date: "2022-09-30"
+---
+
+
+installing the libraries
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+library("EpiModel")
+library("dplyr")
+library("ggplot2")
+```
+
+
+defining a new function for the model instead of the standard sir model
+in this model we introduce v as the vaccinated group and new possible transitions
+there are 6 transitions in this model namely
+from S to I, from S to V, from I to R, from R to V, from R to S and from V to S
+the order of operation in this model is S>I, I>R, S>V, R>V, R>s, V>S
+```{r}
+progress <- function(dat, at) {
+
+#getting the attributives needed for the function
+  active <- get_attr(dat, "active")
+  status <- get_attr(dat, "status")
+
+#getting the inputted parameters at the correct time steps
+  ir.rate <- get_param(dat, "rec.rate",at) #from I to R (recovery)
+  sv.rate <- get_param(dat, "sv.rate",at)  #from S to V (vaccination)
+  vs.rate <- get_param(dat, "vs.rate",at)  #from V to S (vaccination no longer effective)
+  rs.rate <- get_param(dat, "rs.rate",at)  #from R to S (no longer immune from being infected)
+  rv.rate <- get_param(dat, "rv.rate",at)  #from R to V (vaccination even though the person was infected and immune at the time)
+
+
+#transition function from I to R
+  nRec <- 0   #setting the number of recovered to 0 
+  idsEligRec <- which(active == 1 & status == "i")   #determining which nodes are eligible for recovery
+  nEligRec <- length(idsEligRec)    #setting the number of people that are eligible for recovery
+
+  if (nEligRec > 0) {
+    vecRec <- which(rbinom(nEligRec, 1, ir.rate) == 1)   #determining which people that were eligible for recovery actually recover at a certain timestep
+    if (length(vecRec) > 0) {
+      idsRec <- idsEligRec[vecRec]   #saving the id's of the people that recovered at this time step
+      nRec <- length(idsRec)   #setting the number of people that recovered at this time step
+      status[idsRec] <- "r"   #chaninging their status from infected to recovered
+    }
+  }
+
+#transition function from S to V (all transition functions work the same way as the one described above from I to R)
+  nvac <- 0
+  idsEligvac <- which(active == 1 & status == "s")
+  nEligvac <- length(idsEligvac)
+
+  if (nEligvac > 0) {
+    vecvac <- which(rbinom(nEligvac, 1, sv.rate) == 1)
+    if (length(vecvac) > 0) {
+      idsvac <- idsEligvac[vecvac]
+      nvac <- length(idsvac) 
+      status[idsvac] <- "v"
+    }
+  }
+  
+#transition function from R to V
+  nvacr <- 0 
+  idsEligvacr <- which(active == 1 & status == "r")
+  nEligvacr <- length(idsEligvacr)
+
+  if (nEligvacr > 0) {
+    vecvacr <- which(rbinom(nEligvacr, 1, rv.rate) == 1)
+    if (length(vecvacr) > 0) {
+      idsvacr <- idsEligvacr[vecvacr]
+      nvacr <- length(idsvacr) 
+      status[idsvacr] <- "v"
+    }
+  }
+  
+#transition function from R to S
+  nsusr <- 0 
+  idsEligsusr <- which(active == 1 & status == "r")
+  nEligsusr <- length(idsEligsusr)
+
+  if (nEligsusr > 0) {
+    vecsusr <- which(rbinom(nEligsusr, 1, rs.rate) == 1)
+    if (length(vecsusr) > 0) {
+      idssusr <- idsEligsusr[vecsusr]
+      nsusr <- length(idssusr) 
+      status[idssusr] <- "s"
+    }
+  }
+  
+#transition function from V to S
+  nsusv <- 0 
+  idsEligsusv <- which(active == 1 & status == "v")
+  nEligsusv <- length(idsEligsusv)
+
+  if (nEligsusv > 0) {
+    vecsusv <- which(rbinom(nEligsusv, 1, vs.rate) == 1)
+    if (length(vecsusv) > 0) {
+      idssusv <- idsEligsusv[vecsusv]
+      nsusv <- length(idssusv) 
+      status[idssusv] <- "s"
+    }
+  }
+ 
+  
+   
+#updating the status' of the nodes to their new status 
+  dat <- set_attr(dat, "status", status)
+
+
+#saving the flow from one group to another at this time step
+  dat <- set_epi(dat, "ir.flow", at, nRec)
+  dat <- set_epi(dat, "sv.flow", at, nvac)
+  dat <- set_epi(dat, "rv.flow", at, nvacr)
+  dat <- set_epi(dat, "rs.flow", at, nsusr)
+  dat <- set_epi(dat, "vs.flow", at, nsusv)
+  
+  
+#saving the number of recovered and vaccinated at this time 
+  dat <- set_epi(dat, "r.num", at,
+                 sum(active == 1 & status == "r"))
+  dat <- set_epi(dat, "v.num", at,
+                 sum(active == 1 & status == "v"))
+
+  
+#returning all the new data
+  return(dat)
+}
+```
+
+
+list of changes of the parameters at certain time points to fit it to the actual data and incorporate the measurements that were taken and the rate of vaccination
+```{r}
+#setting up the list of the changes
+list.of.updaters <- list(
+  list(
+    at = 1,  #time step on which the change happens
+    param = list(  #base values
+      inf.prob = 0.11, 
+      act.rate = 1.96,
+      rec.rate = 1/20,
+      sv.rate = 0,
+      rv.rate = 0,
+      rs.rate=1/213,
+      vs.rate=1/183
+    )
+  ),
+  list(   #more tests so less contact
+    at = 22,
+    param = list(
+    act.rate = 1.56
+    )
+  ),
+  list(   #restaurants close earlier so less contact
+    at = 26,
+    param = list(
+      act.rate = 1.5
+    )
+  ),
+  list(   #healthcare staff tests more so less infected people working in healthcare so less infection chance
+    at = 29,
+    param = list(
+      inf.prob = 0.107
+    )
+  ),
+   list(   #less people on events and restaurants close even earlier so less contact
+    at = 36,
+    param = list(
+      act.rate = 1.37
+    )
+   ),
+    list(   #coronamelder app was used more so less infected people on the streets so less infection chance
+    at = 48,
+    param = list(
+      inf.prob = 0.1
+    )
+   ),
+    list(   #lockdown and mouthmasks were introduced so less contact and less infection chance
+    at = 52,
+    param = list(
+      inf.prob = 0.095,
+      act.rate = 0.49
+    )
+  ),
+    list(    #stronger lockdown so even less contact
+    at = 72,
+    param = list(
+      act.rate = 0.33
+    )
+  ),
+  list(   #mutation of the virus and mink could transmit the virus so higher infection probability
+    at = 80,
+    param = list(
+      inf.prob = 0.101
+    )
+  ),
+  list(   #back to lockdown of day 52
+    at = 86,
+    param = list(
+      act.rate = 0.5
+    )
+  ),
+  list(   #you can now test without having symptoms so less infected people on the streets so less infection chance
+    at = 95,
+    param = list(
+      inf.prob = 0.097
+    )
+  ),
+  list(   #sinterklaas was coming up so more contact 
+    at = 96,
+    param = list(
+      inf.prob = 0.105,
+      act.rate = 0.75
+    )
+  ),
+  list(  #mouthmasks were obligated in public spaces so less infection chance
+    at = 100,
+    param = list(
+      inf.prob = 0.1
+    )
+  ),
+  list(  #sinterklaas so a lot more contact
+    at = 102,
+    param = list(
+      act.rate = 1.1
+    )
+  ),
+  list(   #sinterklaas is over so back to less contact
+    at = 109,
+    param = list(
+      act.rate = 0.75
+    )
+  ),
+  list(   #strong lockdown so less contact
+    at = 114,
+    param = list(
+      act.rate = 0.69
+    )
+  ),
+  list(   #obligated negative tests for traveling and christmas so more contact
+    at = 117,
+    param = list(
+      inf.prob = 0.09,
+      act.rate = 0.9
+    )
+  ),
+  list(   #mutation of the virus so infection probabilty goes up
+    at = 122,
+    param = list(
+      inf.prob = 0.1
+    )
+  ),
+  list(   #new year so more contact
+    at = 129,
+    param = list(
+      act.rate = 1
+    )
+  ),
+  list(  #new years is over so back to normal contact again
+    at = 130,
+    param = list(
+      inf.prob = 0.094,
+      act.rate = 0.25
+    )
+  ),
+  list(  #more processes are seen as vital so more contact and vaccination started
+    at = 136,
+    param = list(
+      act.rate = 0.35,
+      sv.rate = 0.0014,
+      rv.rate = 0.0005
+    )
+  ),
+  list(  #lockdown prolonged so still small amount of contacts
+    at = 142,
+    param = list(
+      act.rate = 0.35
+    )
+  ),
+  list(  #big wave of the virus on the rise to more chance of getting infected
+    at = 144,
+    param = list(
+      inf.prob = 0.1
+    )
+  ),
+  list(  #max one vistior so less contact (if action rate is lowered it doesnt fit the curve so made it higher instead of lower)
+    at = 150,
+    param = list(
+      act.rate = 0.68
+    )
+  ),
+  list(  #change in the amount of people who can go to court small change of contact 
+    at = 152,
+    param = list(
+      act.rate = 0.7
+    )
+  ),
+  list(  #curfew so less contact (again if it is lowered it doesnt fit the data)
+    at = 153,
+    param = list(
+      act.rate = 0.69
+    )
+  ),
+  list(  #selftests are now valid so less infected people so less infection chance
+    at = 159,
+    param = list(
+      inf.prob = 0.099,
+      act.rate = 0.6
+    )
+  ),
+  list(  #lockdown so still low number of contact
+    at = 163,
+    param = list(
+      act.rate = 0.4
+    )
+  ),
+  list(  #made clear with which symptoms people should stay at home so less infection chance
+    at = 167,
+    param = list(
+      inf.prob = 0.095
+    )
+  ),
+  list(  #primary schools open up again so more contact
+    at = 169,
+    param = list(
+      act.rate = 0.55
+    )
+  ),
+  list(  #increase in the number of vaccinations and selftests are only valid for 24 hours
+    at = 176,
+    param = list(
+      inf.prob = 0.097,
+      sv.rate = 0.0016,
+      rv.rate = 0.0006
+    )
+  ),
+  list(  #contact proffestions and shops open on reservation so more contact
+    at = 192,
+    param = list(
+      act.rate = 0.75,
+      sv.rate = 0.002
+    )
+  ),
+  list(  #antigen tests are now also valid so even more selftests so lower infection rate
+    at = 194,
+    param = list(
+      inf.prob = 0.095
+    )
+  ),list(  #travel to the UK is allowed so more contact
+    at = 198,
+    param = list(
+      act.rate = 0.82
+    )
+  ),
+  list(  #opening exam locations so more contact
+    at = 202,
+    param = list(
+      act.rate = 0.9,
+      sv.rate = 0.0028
+    )
+  ),
+  list(  #shops can take more customers so a lot more contact
+    at = 205,
+    param = list(
+      act.rate = 1.4,
+      sv.rate = 0.003
+    )
+  ),
+  list(  #curfew was set to go in at a later time so more contact
+    at = 220,
+    param = list(
+      act.rate = 1.6,
+      inf.prob = 0.092,
+      sv.rate = 0.0063,
+      rv.rate = 0.00083
+    )
+  ),
+  list(  #selftest in schools
+    at = 234,
+    param = list(
+      inf.prob = 0.093,
+      sv.rate = 0.0068
+    )
+  ),
+  list(  #out of school care reopens so more contact
+    at = 239,
+    param = list(
+      act.rate = 1.62,
+      sv.rate = 0.007
+    )
+  ),
+  list(  #cant travel to india 
+    at = 245,
+    param = list(
+      act.rate = 0.9
+    )
+  ),
+  list(  #university and HBO open up again so more contact (if the action rate increases it doesnt fit the curve so was lowered instead)
+    at = 246,
+    param = list(
+      act.rate =0.85
+    )
+  ),
+  list(  #curfew is no more so more contact (again if it increases the action rate it doesnt fit the curve)
+    at = 248,
+    param = list(
+      act.rate = 0.7
+    )
+  ),
+  list(  #more test locations so lower infection probabilty and more people are being vaccinated
+    at = 256,
+    param = list(
+      inf.prob = 0.084,
+      sv.rate = 0.008,
+      rv.rate = 0.001
+    )
+  ),list(  
+    at = 269,
+    param = list(
+      act.rate = 0.5
+    )
+  ),
+  list(  #reopening of the public libraries so increased contact (again if it was increased it wouldnt fit the curve) 
+    at = 270,
+    param = list(
+      act.rate = 0.4
+    )
+  )
+)
+
+```
+
+
+making the actual model
+```{r}
+#setting number of nodes and calculating number of ppl per node
+nodes <- 7500  #number of nodes
+pplnode <- 17600000/nodes  #number of people the node represents 
+
+
+
+#making the network
+nw <- network_initialize(nodes)
+#making a distribution of age in the network 
+nw <- set_vertex_attribute(nw, "age", rnorm(nodes, mean = 50, sd = 15))
+#setting the desired number of edges the degree where no more edges can be formed the desired age difference and the number of nodes with no links
+formation <- ~edges + degrange(from=4) + absdiff("age") + isolates
+#number of edges is around 70% of the number of nodes, no nodes with more than 3 edges, a desired age difference of 5 years between nodes, done to increase contact in groups and not fully random, and around 10% of nodes dont have edges contected to them
+target.stats <- c(nodes*0.7,0,nodes*3.5, nodes*0.1)
+
+
+
+#setting the time it takes for a edge to dissolve 
+coef.diss <- dissolution_coefs(dissolution = ~offset(edges), duration = 6)
+#runing the network estimation
+est <- netest(nw, formation, target.stats, coef.diss)
+
+
+
+#defining the model that will be used and the functions used for infection an vaccination
+control <- control.net(type = NULL, nsteps = 280, nsims = 10,ncores = 10, infection.FUN = infection.net, progress.FUN = progress,resimulate.network = FALSE, verbose = TRUE)
+#setting the initial parameters and adding a list of changes at certain times
+param <- param.net(inf.prob = 0.11, act.rate = 1.3, rec.rate = 1/20,sv.rate = 0,rv.rate=0,rs.rate=1/213,vs.rate=1/183, .param.updater.list = list.of.updaters)
+#initial number of nodes in specific groups
+init <- init.net(i.num = 0.0008*nodes, r.num = 0)
+#running the simulation
+sim <- netsim(est, param, init, control)
+
+
+
+#plotting the simulation
+plot(sim)
+#plotting the number of infections with the preprocessed data going through it
+df <- as.data.frame(sim)
+df.mean <- as.data.frame(sim, out = "mean")
+predata <- read.csv("preprocessing_v1.csv") #change this to own directory so no errors happen
+
+plot(df.mean$i.num*pplnode, type = "l", xlab ="time [days]", ylab= "number of infected", ylim = c(0,255000))
+lines(predata, col = "red")
+legend(1,230000,legend=c("simulation","data"),col = c("black","red"), lty=1:1, cex=0.8)
+grid(nx = NULL, ny = NULL,lty = 2, col = "gray",lwd = 1) 
+
+#plotting the number of infections for each simulation the mean and the CI
+ggplot() +   geom_line(data = df, mapping = aes(time, pplnode*i.num, group = sim), alpha = 0.25,
+            lwd = 0.25, color = "firebrick") +
+  geom_bands(data = df, mapping = aes(time, pplnode*i.num),
+             lower = 0.1, upper = 0.9, fill = "firebrick") +
+  geom_line(data = df.mean, mapping = aes(time, pplnode*i.num)) + xlab("time [days]") + ylab("number of infected")+
+  theme_minimal()
+ggsave(file = "infect number.pdf", dpi = 450)
+
+#plotting the same but then for the number of vaccinations
+ggplot() +
+  geom_line(data = df, mapping = aes(time, v.num/nodes, group = sim), alpha = 0.25,
+            lwd = 0.25, color = "firebrick") +
+  geom_bands(data = df, mapping = aes(time, v.num/nodes),
+             lower = 0.1, upper = 0.9, fill = "firebrick") +
+  geom_line(data = df.mean, mapping = aes(time, v.num/nodes)) + xlim(c(130,280)) +
+  theme_minimal()
+ggsave(file = "vaccine number.pdf", dpi = 450)
+```
+
+
+Not used in this part is for video at the end
+```{r}
+#not used is for possible video at the end of the project
+library("ndtv")
+packageVersion("ndtv")
+library("htmlwidgets")
+nw <- get_network(sim)
+nw <- color_tea(nw)
+slice.par <- list(start = 30, end = 150, interval = 1, 
+                  aggregate.dur = 1, rule = "any")
+render.par <- list(tween.frames = 10, show.time = FALSE)
+plot.par <- list(mar = c(0, 0, 0, 0))
+compute.animation(nw, slice.par = slice.par, verbose = TRUE)
+render.d3movie(
+  nw,
+  render.par = render.par,
+  plot.par = plot.par,
+  vertex.cex = 0.9,
+  vertex.col = "ndtvcol",
+  edge.col = "darkgrey",
+  vertex.border = "lightgrey",
+  displaylabels = FALSE,
+  filename = paste0(getwd(), "/movie.html"))
+```
